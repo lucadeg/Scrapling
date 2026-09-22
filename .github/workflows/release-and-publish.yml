@@ -2,11 +2,8 @@ name: Create Release and Publish to PyPI
 # Creates a GitHub release when a PR is merged to main (using PR title as version and body as release notes), then publishes to PyPI.
 
 on:
-  pull_request:
-    types: [closed]
-    branches:
-      - main
-
+  workflow_dispatch:
+  # Automatic triggers removed; invoke through FounderOS/Admin Gate.
 jobs:
   create-release-and-publish:
     if: github.event.pull_request.merged == true

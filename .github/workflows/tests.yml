@@ -1,34 +1,7 @@
 name: Tests
 on:
-  push:
-    branches:
-      - main
-      - dev
-    paths-ignore:
-      - '*.md'
-      - '**/*.md'
-      - 'docs/**'
-      - 'images/**'
-      - '.github/**'
-      - 'agent-skill/**'
-      - '*.yml'
-      - '*.yaml'
-      - 'ruff.toml'
-  pull_request:
-    branches:
-      - main
-      - dev
-    paths-ignore:
-      - '*.md'
-      - '**/*.md'
-      - 'docs/**'
-      - 'images/**'
-      - '.github/**'
-      - 'agent-skill/**'
-      - '*.yml'
-      - '*.yaml'
-      - 'ruff.toml'
-
+  workflow_dispatch:
+  # Automatic triggers removed; invoke through FounderOS/Admin Gate.
 concurrency:
   group: ${{github.workflow}}-${{ github.ref }}
   cancel-in-progress: true

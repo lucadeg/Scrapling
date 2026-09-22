@@ -1,34 +1,10 @@
+
 name: Code Quality
 
 on:
-  push:
-    branches:
-      - main
-      - dev
-    paths-ignore:
-      - '*.md'
-      - '**/*.md'
-      - 'docs/**'
-      - 'images/**'
-      - '.github/**'
-      - 'agent-skill/**'
-      - '!.github/workflows/code-quality.yml'  # Always run when this workflow changes
-  pull_request:
-    branches:
-      - main
-      - dev
-    paths-ignore:
-      - '*.md'
-      - '**/*.md'
-      - 'docs/**'
-      - 'images/**'
-      - '.github/**'
-      - 'agent-skill/**'
-      - '*.yml'
-      - '*.yaml'
-      - 'ruff.toml'
   workflow_dispatch:  # Allow manual triggering
 
+  # Automatic triggers removed; invoke through FounderOS/Admin Gate.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
