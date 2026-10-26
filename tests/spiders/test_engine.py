@@ -10,6 +10,7 @@ from scrapling.spiders.engine import CrawlerEngine, _dump
 from scrapling.spiders.request import Request
 from scrapling.spiders.robotstxt import RobotsTxtManager
 from scrapling.spiders.session import SessionManager
+from scrapling.spiders.scheduler import Scheduler
 from scrapling.spiders.result import CrawlStats, ItemList
 from scrapling.spiders.checkpoint import CheckpointData
 from scrapling.core._types import Any, Dict, Set, AsyncGenerator
@@ -78,6 +79,11 @@ class MockSpider:
         concurrent_requests_per_domain: int = 0,
         download_delay: float = 0.0,
         max_blocked_retries: int = 3,
+        autothrottle_enabled: bool = False,
+        autothrottle_start_delay: float = 5.0,
+        autothrottle_max_delay: float = 60.0,
+        autothrottle_target_concurrency: float | None = None,
+        autothrottle_block_backoff: bool = True,
         allowed_domains: Set[str] | None = None,
         fp_include_kwargs: bool = False,
         fp_include_headers: bool = False,
@@ -92,6 +98,11 @@ class MockSpider:
         self.concurrent_requests_per_domain = concurrent_requests_per_domain
         self.download_delay = download_delay
         self.max_blocked_retries = max_blocked_retries
+        self.autothrottle_enabled = autothrottle_enabled
+        self.autothrottle_start_delay = autothrottle_start_delay
+        self.autothrottle_max_delay = autothrottle_max_delay
+        self.autothrottle_target_concurrency = autothrottle_target_concurrency
+        self.autothrottle_block_backoff = autothrottle_block_backoff
         self.allowed_domains = allowed_domains or set()
         self.fp_include_kwargs = fp_include_kwargs
         self.fp_include_headers = fp_include_headers
@@ -368,16 +379,27 @@ class TestProcessRequest:
         assert engine.stats.requests_count == 0
 
     @pytest.mark.asyncio
-    async def test_blocked_response_triggers_retry(self):
+    @pytest.mark.parametrize("strategy", ["bfs", "dfs"])
+    async def test_blocked_response_triggers_retry(self, strategy):
         spider = MockSpider(is_blocked_fn=lambda r: True, max_blocked_retries=2)
         engine = _make_engine(spider=spider)
+        engine.scheduler = Scheduler(crawl_strategy=strategy)
 
+        other = Request("https://example.com/other", sid="default")
+        await engine.scheduler.enqueue(other)
         request = Request("https://example.com", sid="default")
         await engine._process_request(request)
 
         assert engine.stats.blocked_requests_count == 1
         # A retry request should be enqueued
         assert not engine.scheduler.is_empty
+        assert await engine.scheduler.dequeue() is other
+        retry = await engine.scheduler.dequeue()
+        assert retry.url == request.url
+        assert retry.priority == -1
+        assert request.priority == 0
+        assert retry._retry_count == 1
+        assert retry.dont_filter
 
     @pytest.mark.asyncio
     async def test_blocked_response_max_retries_exceeded(self):

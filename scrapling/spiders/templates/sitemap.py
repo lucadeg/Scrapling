@@ -1,8 +1,6 @@
 """Sitemap template spider."""
 
 from dataclasses import dataclass, field
-from gzip import GzipFile
-from io import BytesIO
 from urllib.parse import urlsplit
 
 from lxml import etree
@@ -21,16 +19,13 @@ from scrapling.spiders.links import LinkExtractor
 from scrapling.spiders.request import Request
 from scrapling.spiders.spider import Spider
 from scrapling.spiders.templates.crawler import CrawlRule
+from scrapling.spiders.templates._utils import _decompress
 
 if TYPE_CHECKING:
     from scrapling.engines.toolbelt.custom import Response
 
 
 __all__ = ["SitemapSpider"]
-
-
-_GZIP_MAGIC = b"\x1f\x8b"
-_GUNZIP_MAX_SIZE = 64 * 1024 * 1024  # 64 MiB cap, defends against gzip bombs
 
 
 @dataclass
@@ -84,23 +79,12 @@ class SitemapSpider(Spider):
         """Extract `Sitemap` directives from a robots.txt body via protego."""
         try:
             text = response.body.decode(response.encoding, errors="replace")
-            parser = Protego.parse(text)
+            # Left in place, a BOM hides the first directive from protego
+            parser = Protego.parse(text.removeprefix("\N{BYTE ORDER MARK}"))
         except Exception as e:
             self.logger.warning(f"Failed to parse robots.txt: {e}")
             return []
         return list(parser.sitemaps)
-
-    @staticmethod
-    def _decompress(body: bytes, content_type: Optional[str]) -> bytes:
-        if (content_type and ("gzip" in content_type.lower())) or (body[:2] == _GZIP_MAGIC):
-            out = bytearray()
-            with GzipFile(fileobj=BytesIO(body)) as f:
-                while chunk := f.read1(8192):
-                    out.extend(chunk)
-                    if len(out) > _GUNZIP_MAX_SIZE:
-                        raise OSError(f"gzip output exceeds {_GUNZIP_MAX_SIZE} bytes")
-            return bytes(out)
-        return body
 
     def _extract_urls(self, root: Any) -> List[str]:
         urls: List[str] = []
@@ -120,12 +104,14 @@ class SitemapSpider(Spider):
 
     @staticmethod
     def _get_type(el: Any) -> str:
+        if not isinstance(el.tag, str):
+            return ""
         return etree.QName(el.tag).localname
 
     def _sm_body(self, body: bytes, content_type: Optional[str] = None) -> SitemapResult:
         """Parse a sitemap body and return its URLs and any child sitemaps."""
         try:
-            body = self._decompress(body, content_type)
+            body = _decompress(body, content_type)
         except OSError as e:
             self.logger.warning(f"Failed to decompress sitemap: {e}")
             return SitemapResult()
@@ -178,13 +164,13 @@ class SitemapSpider(Spider):
             if req is not None:
                 yield req
 
-    @staticmethod
-    def _dispatch(response: "Response", url: str, rules: List[CrawlRule]) -> Optional[Request]:
+    def _dispatch(self, response: "Response", url: str, rules: List[CrawlRule]) -> Optional[Request]:
+        # The callback is always set explicitly, otherwise `follow()` would inherit `_parse_sitemap` from the sitemap request
         if not rules:
-            return response.follow(url)
+            return response.follow(url, callback=self.parse)
         for rule in rules:
             if rule.link_extractor.matches(url):
-                req = response.follow(url, callback=rule.callback)
+                req = response.follow(url, callback=rule.callback or self.parse)
                 if rule.priority is not None:
                     req.priority = rule.priority
                 if rule.process_request is not None:

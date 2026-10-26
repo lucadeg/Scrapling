@@ -1,3 +1,8 @@
+---
+title: "Build Your First Python Web Crawler with Scrapling"
+description: "Build a spider that extracts items, follows pagination and exports results. Learn start URLs, callbacks, domain limits and robots.txt settings."
+---
+
 # Getting started
 
 ## Introduction
@@ -125,9 +130,17 @@ result.items.to_json("quotes.json", indent=True)
 
 # Export as JSON Lines (one JSON object per line)
 result.items.to_jsonl("quotes.jsonl")
+
+# Export as CSV or XML
+result.items.to_csv("quotes.csv")
+result.items.to_xml("quotes.xml")
 ```
 
-Both methods create parent directories automatically if they don't exist.
+All of them create parent directories automatically if they don't exist.
+
+`to_csv()` writes a column for every key found across your items, so items that don't all share the same keys are still exported with the missing cells left empty. Pass `fields=[...]` to pick the columns and their order yourself, or `delimiter="\t"` for a TSV file. `to_xml()` wraps each item in an `<item>` element inside an `<items>` root, both renameable through `root_tag` and `item_tag`.
+
+In both formats, values that aren't simple scalars (a nested dictionary or a list) are written as JSON so nothing is silently dropped.
 
 ## Filtering Domains
 
@@ -168,11 +181,13 @@ When enabled, the spider will:
 
 1. **Pre-fetch robots.txt** for all domains in `start_urls` before the crawl begins (concurrently).
 2. **Check every request** against the domain's robots.txt `Disallow` rules. Disallowed requests are silently dropped and counted in `stats.robots_disallowed_count`.
-3. **Respect `Crawl-delay` and `Request-rate` directives** by taking the maximum of the directive and your configured `download_delay`. This means robots.txt delays never reduce your configured delay, only increase it when needed.
+3. **Respect `Crawl-delay` and `Request-rate` directives** by taking the maximum of the directive and your configured `download_delay`. This means robots.txt delays never reduce your configured delay, only increase it when needed. When AutoThrottle is enabled, its maximum delay also caps this value. Set `autothrottle_max_delay` high enough to honor the required delay.
 
 Robots.txt files are fetched using the spider's default session and cached per domain for the entire crawl. Domains discovered mid-crawl (not in `start_urls`) have their robots.txt fetched on the first request to that domain.
 
 **Note:** `robots_txt_obey` is turned off by default to avoid surprising behavior. If you enable it, it does not affect your concurrency settings (`concurrent_requests`, `concurrent_requests_per_domain`) -- only the delay between requests is adjusted.
+
+If you don't want to pick a `download_delay` by hand, set `autothrottle_enabled = True` and the spider will tune the delay of every domain on its own from how fast it responds, backing off when it gets blocked. See [AutoThrottle](advanced.md#autothrottle).
 
 ## What's Next
 
@@ -181,4 +196,4 @@ Now that you have the basics, you can explore:
 - [Requests & Responses](requests-responses.md) - learn about request priority, deduplication, metadata, and more.
 - [Sessions](sessions.md) - use multiple fetcher types (HTTP, browser, stealth) in a single spider.
 - [Proxy management & blocking](proxy-blocking.md) - rotate proxies across requests and how to handle blocking in the spider.
-- [Advanced features](advanced.md) - concurrency control, pause/resume, streaming, lifecycle hooks, and logging.
+- [Advanced features](advanced.md) - concurrency control, AutoThrottle, pause/resume, streaming, lifecycle hooks, and logging.

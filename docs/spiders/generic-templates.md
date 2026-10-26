@@ -1,8 +1,13 @@
+---
+title: "Spider Templates for Links, Sitemaps, Feeds and Markdown"
+description: "Choose CrawlSpider, SitemapSpider, XMLFeedSpider, CSVFeedSpider or ContentSpider. Set rules to collect pages, feed rows or a Markdown corpus."
+---
+
 # Generic Spider Templates
 
 Most crawls fall into one of two patterns: "follow links matching this pattern" or "crawl every URL listed in the site's sitemap". Scrapling ships templates for both so you don't have to hand-write the same `parse()` boilerplate every time.
 
-All templates build on `LinkExtractor`, which pulls URLs out of a `Response` (or filters a single URL via `matches()`). `SitemapSpider` additionally parses sitemap.xml / sitemap_index.xml bodies internally (gzip-compressed or not).
+`CrawlSpider` and `SitemapSpider` build on `LinkExtractor`, which pulls URLs out of a `Response` (or filters a single URL via `matches()`). `SitemapSpider` additionally parses sitemap.xml / sitemap_index.xml bodies internally (gzip-compressed or not).
 
 You can use `LinkExtractor` directly inside any plain `Spider.parse()`. The templates just save you the wiring.
 
@@ -36,6 +41,21 @@ result = QuotesSpider().start()
 A `CrawlRule` pairs a `LinkExtractor` with an optional `callback` (a bound method on the spider), an optional `priority` override for the dispatched `Request`, and an optional `process_request` (a bound method that mutates each `Request` before it's yielded). The default `parse()` runs every rule against every response and yields a `Request` per matched URL.
 
 If a rule has no callback, the matched URLs fall through to the spider's default `parse()`. This is convenient for pagination: extract the next-page links to keep the crawl going, without needing a separate handler.
+
+### Crawl order
+
+Set `crawl_strategy` on `CrawlSpider` or its subclasses, including `ContentSpider`, to choose the next pending request:
+
+| `crawl_strategy` | Order within the same `Request.priority` |
+|------------------|------------------------------------------|
+| `"bfs"` (default) | Oldest queued request first |
+| `"dfs"` | Newest queued request first |
+
+The scheduler takes pending requests with higher `Request.priority` first. The strategy only orders requests with equal priority.
+
+Set `concurrent_requests = 1` to process one request at a time in the selected queue order. Duplicate URLs are still filtered; finding a URL again does not move its queued request. With parallel requests, pages can finish in a different order, and levels or branches can overlap.
+
+Keep the same `crawl_strategy` when resuming from a checkpoint.
 
 ### Combining rules with custom logic
 
@@ -121,6 +141,96 @@ class MySitemap(SitemapSpider):
 ### Alternate-language URLs
 
 Set `sitemap_alternate_links = True` to also dispatch `<xhtml:link rel="alternate" hreflang="...">` URLs through your rules.
+
+## XMLFeedSpider
+
+`XMLFeedSpider` iterates over the nodes of an XML feed (RSS, Atom, product feeds, etc.). Set `itertag` to the node name you want (default: `"item"`) and override `parse_node()`, which is called once per matching node:
+
+```python
+from scrapling.spiders import XMLFeedSpider
+
+class RSSSpider(XMLFeedSpider):
+    name = "rss"
+    start_urls = ["https://example.com/feed.xml"]
+    itertag = "item"
+
+    async def parse_node(self, response, node):
+        yield {
+            "title": node.findtext("title"),
+            "link": node.findtext("link"),
+            "date": node.findtext("pubDate"),
+        }
+
+result = RSSSpider().start()
+```
+
+Like the other callbacks, `parse_node()` can also yield `Request` objects (for example, `response.follow(node.findtext("link"), callback=self.parse_post)`) to crawl into the pages the feed points to.
+
+### How nodes are matched and parsed
+
+Each node passed to `parse_node()` is an `lxml` element with all namespaces stripped, so `node.findtext("title")`, `node.find("thumbnail").get("url")`, and case-sensitive `node.xpath(...)` work on any feed without namespace maps. A plain `itertag` like `"entry"` matches nodes by name regardless of their namespace, which is what you want for Atom and most namespaced feeds. To match a node in one specific namespace, use a prefixed `itertag` and define the prefix in `namespaces`:
+
+```python
+class ThumbnailSpider(XMLFeedSpider):
+    name = "thumbs"
+    start_urls = ["https://example.com/feed.xml"]
+    itertag = "media:thumbnail"
+    namespaces = (("media", "http://search.yahoo.com/mrss/"),)
+
+    async def parse_node(self, response, node):
+        yield {"thumbnail": node.get("url")}
+```
+
+Gzipped feeds (`.xml.gz` or served with a gzip content-type) are decompressed automatically with the same protections the sitemap spider uses, and malformed XML logs a warning instead of crashing the crawl.
+
+## CSVFeedSpider
+
+`CSVFeedSpider` iterates over the rows of a CSV feed. Override `parse_row()`, which receives each row as a dictionary keyed by the column names:
+
+```python
+from scrapling.spiders import CSVFeedSpider
+
+class PriceSpider(CSVFeedSpider):
+    name = "prices"
+    start_urls = ["https://example.com/products.csv"]
+
+    async def parse_row(self, response, row):
+        yield {"product": row["title"], "price": float(row["price"])}
+
+result = PriceSpider().start()
+```
+
+By default, the first row of the feed is used as the header. If the feed has no header row, set `headers` to the column names yourself, and use `delimiter`/`quotechar` for feeds that don't follow the standard comma format:
+
+```python
+class PriceSpider(CSVFeedSpider):
+    name = "prices"
+    start_urls = ["https://example.com/products.csv"]
+    headers = ["title", "price", "url"]
+    delimiter = ";"
+```
+
+Gzipped feeds are decompressed automatically here as well, as shown above for **XMLFeedSpider**.
+
+<a id="sitetomarkdownspider"></a>
+
+## ContentSpider
+
+`ContentSpider` builds on **CrawlSpider** to crawl a website and convert every page to clean, LLM-ready Markdown, yielding one item per page and optionally writing one Markdown file per page:
+
+```python
+from scrapling.spiders import ContentSpider
+
+class DocsSpider(ContentSpider):
+    name = "docs"
+    start_urls = ["https://example.com/docs/"]
+    allowed_domains = {"example.com"}
+    output_dir = "docs_markdown"
+
+result = DocsSpider().start()
+```
+
+It requires `allowed_domains` to keep the crawl bound to the target website. The full guide, including all its options and how to feed the output to RAG pipelines, is on the [Building RAG systems](../ai/building-rag-systems.md) page.
 
 ## Using `LinkExtractor` directly
 

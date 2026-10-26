@@ -14,14 +14,19 @@ from scrapling.engines.toolbelt.custom import Response
 from scrapling.core._types import Any, Dict, Set, AsyncGenerator
 
 
-def _make_response(url: str = "https://example.com", body: bytes = b"<html>hello</html>", status: int = 200) -> Response:
+def _make_response(
+    url: str = "https://example.com",
+    body: bytes = b"<html>hello</html>",
+    status: int = 200,
+    cookies: Any = None,
+) -> Response:
     return Response(
         url=url,
         content=body,
         status=status,
         reason="OK",
         encoding="utf-8",
-        cookies={},
+        cookies={} if cookies is None else cookies,
         headers={"content-type": "text/html"},
         request_headers={"user-agent": "test"},
         method="GET",
@@ -29,7 +34,6 @@ def _make_response(url: str = "https://example.com", body: bytes = b"<html>hello
 
 
 class TestResponseCacheManager:
-
     @pytest.mark.anyio
     async def test_put_get_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -48,6 +52,87 @@ class TestResponseCacheManager:
             assert restored.encoding == original.encoding
             assert dict(restored.headers) == dict(original.headers)
             assert dict(restored.request_headers) == dict(original.request_headers)
+
+    @pytest.mark.anyio
+    async def test_put_get_roundtrip_preserves_browser_engine_cookies(self):
+        """Regression test for #376.
+
+        Browser engines (Playwright) populate ``Response.cookies`` as a ``tuple`` of
+        full cookie dicts (see ``engines/toolbelt/convertor.py``), unlike the flat
+        ``dict`` the static engine uses. The cache previously only recognized the
+        ``dict`` shape and silently discarded any other cookies, so a cached
+        browser-engine response replayed with no cookies at all.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = ResponseCacheManager(tmpdir)
+            fp = b"\x06" * 20
+            browser_cookies = (
+                {
+                    "name": "session",
+                    "value": "abc123",
+                    "domain": "example.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "Lax",
+                },
+                {
+                    "name": "csrftoken",
+                    "value": "xyz789",
+                    "domain": "example.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": False,
+                    "secure": True,
+                    "sameSite": "Strict",
+                },
+            )
+            original = _make_response(cookies=browser_cookies)
+
+            await cache.put(fp, original, "GET")
+            restored = await cache.get(fp)
+
+            assert restored is not None
+            assert restored.cookies == browser_cookies
+            assert isinstance(restored.cookies, tuple)
+
+    @pytest.mark.anyio
+    async def test_put_get_roundtrip_preserves_static_engine_cookies(self):
+        """Flat-dict cookies (static engine) must still round-trip as a ``dict``."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = ResponseCacheManager(tmpdir)
+            fp = b"\x07" * 20
+            static_cookies = {"session": "abc123", "csrftoken": "xyz789"}
+            original = _make_response(cookies=static_cookies)
+
+            await cache.put(fp, original, "GET")
+            restored = await cache.get(fp)
+
+            assert restored is not None
+            assert restored.cookies == static_cookies
+            assert isinstance(restored.cookies, dict)
+
+    @pytest.mark.anyio
+    async def test_put_overwrites_existing_entry(self):
+        """Re-caching the same fingerprint must replace the stored response.
+
+        Regression test for a Windows-only failure: ``Path.rename`` cannot
+        overwrite an existing destination on Windows (raising ``WinError 183``),
+        so the second ``put`` was caught by the error handler, the temp file was
+        removed, and ``get`` kept returning the stale body. ``Path.replace``
+        overwrites atomically on every platform.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = ResponseCacheManager(tmpdir)
+            fp = b"\x05" * 20
+
+            await cache.put(fp, _make_response(body=b"<html>first</html>"), "GET")
+            await cache.put(fp, _make_response(body=b"<html>second</html>"), "GET")
+
+            restored = await cache.get(fp)
+            assert restored is not None
+            assert restored.body == b"<html>second</html>"
 
     @pytest.mark.anyio
     async def test_get_cache_miss(self):
@@ -138,6 +223,11 @@ class MockSpider:
         self.concurrent_requests_per_domain = 0
         self.download_delay = 0.0
         self.max_blocked_retries = 3
+        self.autothrottle_enabled = False
+        self.autothrottle_start_delay = 5.0
+        self.autothrottle_max_delay = 60.0
+        self.autothrottle_target_concurrency = None
+        self.autothrottle_block_backoff = True
         self.allowed_domains: Set[str] = set()
         self.fp_include_kwargs = False
         self.fp_include_headers = False
@@ -177,6 +267,82 @@ class MockSpider:
 
 
 class TestDevelopmentModeIntegration:
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("blocked_status", [403, 200])
+    async def test_blocked_response_is_not_replayed_for_retry(self, tmp_path: Path, blocked_status: int) -> None:
+        """Retries fetch again, and only the accepted response is replayed later."""
+
+        class RecoveringSession(MockSession):
+            async def fetch(self, url: str, **kwargs: Any) -> Response:
+                """Return a blocked response followed by an accepted response."""
+                self.fetch_count += 1
+                response = _make_response(
+                    url=url,
+                    body=b"blocked" if self.fetch_count == 1 else b"success",
+                    status=blocked_status if self.fetch_count == 1 else 200,
+                )
+                response.meta["live_only"] = True
+                return response
+
+        class RetryingSpider(MockSpider):
+            async def is_blocked(self, response: Response) -> bool:
+                """Recognize blocked content independently of the HTTP status."""
+                # Custom hooks may rely on live metadata that the disk cache omits.
+                assert response.meta["live_only"] is True
+                return response.body == b"blocked"
+
+            async def parse(self, response: Response) -> AsyncGenerator[Dict[str, Any] | Request | None, None]:
+                """Expose the body actually delivered to the callback."""
+                yield {"body": response.body}
+
+        session = RecoveringSession()
+        spider = RetryingSpider(cache_dir=str(tmp_path))
+        sm = SessionManager()
+        sm.add("default", session)
+        engine = CrawlerEngine(spider, sm)
+
+        await engine.crawl()
+
+        assert session.fetch_count == 2
+        assert spider.scraped_items == [{"body": b"success"}]
+        assert engine.stats.blocked_requests_count == 1
+        assert engine.stats.cache_hits == 0
+        assert engine.stats.cache_misses == 2
+
+        # A later run should still replay the successful response.
+        cached_session = MockSession()
+        cached_spider = RetryingSpider(cache_dir=str(tmp_path))
+        cached_sm = SessionManager()
+        cached_sm.add("default", cached_session)
+        cached_engine = CrawlerEngine(cached_spider, cached_sm)
+        await cached_engine.crawl()
+
+        assert cached_session.fetch_count == 0
+        assert cached_spider.scraped_items == [{"body": b"success"}]
+        assert cached_engine.stats.cache_hits == 1
+
+    @pytest.mark.anyio
+    async def test_exhausted_blocked_response_is_not_cached(self, tmp_path: Path) -> None:
+        """Exhausting retries must not leave a blocked response on disk."""
+
+        class BlockedSpider(MockSpider):
+            async def is_blocked(self, response: Response) -> bool:
+                """Reject every response for this crawl."""
+                return True
+
+        session = MockSession()
+        spider = BlockedSpider(cache_dir=str(tmp_path))
+        spider.max_blocked_retries = 0
+        sm = SessionManager()
+        sm.add("default", session)
+        engine = CrawlerEngine(spider, sm)
+        await engine.crawl()
+
+        assert session.fetch_count == 1
+        assert engine.stats.blocked_requests_count == 1
+        assert engine.stats.cache_misses == 1
+        assert not spider.scraped_items
+        assert not list(tmp_path.glob("*.json"))
 
     @pytest.mark.anyio
     async def test_first_run_fetches_and_caches(self):
@@ -226,3 +392,36 @@ class TestDevelopmentModeIntegration:
         sm.add("default", MockSession())
         engine = CrawlerEngine(spider, sm)
         assert engine._cache_manager is None
+
+    @pytest.mark.anyio
+    async def test_cached_run_keeps_the_request_meta(self):
+        """A cache hit must hand the callback the same meta the live fetch did, not an empty one"""
+
+        class MetaSpider(MockSpider):
+            async def parse(self, response) -> AsyncGenerator[Dict[str, Any] | Request | None, None]:
+                yield {"meta": dict(response.meta)}
+
+            async def start_requests(self) -> AsyncGenerator[Request, None]:
+                yield Request("https://example.com/page1", sid="default", meta={"page": 7})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spider = MetaSpider(cache_dir=tmpdir)
+            sm = SessionManager()
+            sm.add("default", MockSession())
+            await CrawlerEngine(spider, sm).crawl()
+
+            cached_spider = MetaSpider(cache_dir=tmpdir)
+            cached_sm = SessionManager()
+            cached_sm.add("default", MockSession())
+            cached_engine = CrawlerEngine(cached_spider, cached_sm)
+            await cached_engine.crawl()
+
+            assert cached_engine.stats.cache_hits == 1, (
+                f"Expected the second run to be served from the cache, got {cached_engine.stats.cache_hits} hits"
+            )
+            assert spider.scraped_items == [{"meta": {"page": 7}}], (
+                f"Expected the live run to see the request meta, got {spider.scraped_items}"
+            )
+            assert cached_spider.scraped_items == [{"meta": {"page": 7}}], (
+                f"Expected the cached run to see the request meta too, got {cached_spider.scraped_items}"
+            )

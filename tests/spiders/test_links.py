@@ -135,6 +135,61 @@ class TestRestrict:
         urls = LinkExtractor(restrict_xpath='//div[@id="content"]').extract(resp)
         assert urls == ["https://example.com/c"]
 
+    def test_restrict_css_matching_the_link_itself(self):
+        html = """
+        <html><body>
+            <div id="nav"><a class="next" href="/next">next</a></div>
+            <a class="other" href="/other">other</a>
+        </body></html>
+        """
+        resp = _make_response(html)
+        assert LinkExtractor(restrict_css="a.next").extract(resp) == ["https://example.com/next"]
+
+    def test_restrict_xpath_matching_the_link_itself(self):
+        html = """
+        <html><body>
+            <div id="nav"><a class="next" href="/next">next</a></div>
+            <a class="other" href="/other">other</a>
+        </body></html>
+        """
+        resp = _make_response(html)
+        assert LinkExtractor(restrict_xpath='//a[@class="next"]').extract(resp) == ["https://example.com/next"]
+
+    def test_restrict_container_and_link_keep_order_without_duplicates(self):
+        html = """
+        <html><body>
+            <div id="nav"><a href="/first">first</a><a class="next" href="/next">next</a></div>
+            <a href="/outer"><area href="/inner"></a>
+        </body></html>
+        """
+        resp = _make_response(html)
+        assert LinkExtractor(restrict_css="#nav").extract(resp) == [
+            "https://example.com/first",
+            "https://example.com/next",
+        ]
+        # The matched <a> still contributes its own link, then the links inside it
+        assert LinkExtractor(restrict_css="a[href='/outer']").extract(resp) == [
+            "https://example.com/outer",
+            "https://example.com/inner",
+        ]
+        # A container and the links inside it are both matched, but each link is returned once
+        assert LinkExtractor(restrict_css="#nav, #nav a").extract(resp) == [
+            "https://example.com/first",
+            "https://example.com/next",
+        ]
+
+    def test_restrict_matching_nothing_extracts_nothing(self):
+        html = """
+        <html><body>
+            <nav><a href="/nav-link">n</a></nav>
+            <main><a href="/main-link">m</a></main>
+        </body></html>
+        """
+        resp = _make_response(html)
+        assert LinkExtractor(restrict_css=".pagination").extract(resp) == []
+        assert LinkExtractor(restrict_xpath='//div[@class="pagination"]').extract(resp) == []
+        assert LinkExtractor(restrict_css=".pagination", restrict_xpath="//aside").extract(resp) == []
+
 
 class TestTagsAttrs:
     def test_custom_tags_and_attrs_for_stylesheets(self):
@@ -183,12 +238,23 @@ class TestExtensions:
         urls = LinkExtractor().extract(resp)
         assert urls == ["https://example.com/d"]
 
+    def test_default_deny_extensions_drops_compound_archive(self):
+        html = '<a href="/dataset.tar.gz">archive</a><a href="/d">ok</a>'
+        resp = _make_response(html)
+        urls = LinkExtractor().extract(resp)
+        assert urls == ["https://example.com/d"]
+
     def test_custom_deny_extensions_overrides_default(self):
         html = '<a href="/a.pdf">pdf</a><a href="/b.zip">zip</a>'
         resp = _make_response(html)
         urls = LinkExtractor(deny_extensions={"zip"}).extract(resp)
         # .pdf now allowed because we replaced the set
         assert urls == ["https://example.com/a.pdf"]
+
+    def test_custom_deny_extensions_honors_compound_extension(self):
+        ex = LinkExtractor(deny_extensions={"tar.gz"})
+        assert ex.matches("https://example.com/dataset.tar.gz") is False
+        assert ex.matches("https://example.com/dataset.gz") is True
 
     def test_empty_deny_extensions_allows_everything(self):
         html = '<a href="/a.pdf">pdf</a>'

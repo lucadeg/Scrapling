@@ -71,6 +71,11 @@ class SlowSpider:
         self.concurrent_requests_per_domain = 0
         self.download_delay = 0.0
         self.max_blocked_retries = 3
+        self.autothrottle_enabled = False
+        self.autothrottle_start_delay = 5.0
+        self.autothrottle_max_delay = 60.0
+        self.autothrottle_target_concurrency = None
+        self.autothrottle_block_backoff = True
         self.allowed_domains = set()
         self.fp_include_kwargs = False
         self.fp_include_headers = False
@@ -218,6 +223,27 @@ class TestForceStopCheckpointPreservation:
             # No pause → checkpoint should be cleaned up
             assert not checkpoint_path.exists()
             assert engine.paused is False
+
+    @pytest.mark.anyio
+    async def test_crash_keeps_checkpoint(self):
+        """A crawl that ends with an exception must leave the checkpoint on disk."""
+
+        class CrashingSpider(SlowSpider):
+            async def is_blocked(self, response):
+                if response.url.endswith("/page/5"):
+                    raise RuntimeError("boom")
+                return False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spider = CrashingSpider(num_urls=20)
+            engine = _make_engine(spider, MockSession(delay=0.05), crawldir=tmpdir, interval=0.001)
+
+            with pytest.raises(Exception):
+                await engine.crawl()
+
+            assert (Path(tmpdir) / "checkpoint.pkl").exists(), "Checkpoint was deleted after the crawl crashed"
+            assert engine.paused is False
+            assert spider.on_close_calls == 1
 
     @pytest.mark.anyio
     async def test_force_stop_without_checkpoint_system(self):

@@ -1,7 +1,9 @@
+from os import environ
 from pathlib import Path
 from subprocess import check_output
 from sys import executable as python_executable
 
+from scrapling import __version__
 from scrapling.core.utils import log
 from scrapling.engines.toolbelt.custom import Response
 from scrapling.core.utils._shell import _CookieParser, _ParseHeaders
@@ -10,7 +12,7 @@ from scrapling.core._types import List, Optional, Dict, Tuple, Any, Callable
 from orjson import loads as json_loads, JSONDecodeError
 
 try:
-    from click import command, option, Choice, group, argument
+    from click import command, option, Choice, group, argument, version_option, UsageError
 except (ImportError, ModuleNotFoundError) as e:
     raise ModuleNotFoundError(
         "You need to install scrapling with any of the extras to enable Shell commands. See: https://scrapling.readthedocs.io/en/latest/#installation"
@@ -91,7 +93,7 @@ def __BuildRequest(headers: List[str], cookies: str, params: str, json: Optional
         "headers": parsed_headers if parsed_headers else None,
         "cookies": parsed_cookies if parsed_cookies else None,
     }
-    if parsed_json:
+    if parsed_json is not None:
         request_kwargs["json"] = parsed_json
     if parsed_params:
         request_kwargs["params"] = parsed_params
@@ -119,7 +121,7 @@ def install(force):  # pragma: no cover
     if force or not __PACKAGE_DIR__.joinpath(".scrapling_dependencies_installed").exists():
         __Execute(
             [python_executable, "-m", "playwright", "install", "chromium"],
-            "Playwright browsers",
+            "Installing browsers",
         )
         __Execute(
             [
@@ -129,7 +131,7 @@ def install(force):  # pragma: no cover
                 "install-deps",
                 "chromium",
             ],
-            "Playwright dependencies",
+            "Installing browsers dependencies",
         )
         from tld.utils import update_tld_names
 
@@ -150,17 +152,49 @@ def install(force):  # pragma: no cover
 @option(
     "--host",
     type=str,
-    default="0.0.0.0",
-    help="The host to use if streamable-http transport is enabled (Default: '0.0.0.0')",
+    default="127.0.0.1",
+    help="The host to use if streamable-http transport is enabled. Pass '0.0.0.0' to accept connections from "
+    "the network (Default: '127.0.0.1')",
 )
 @option(
     "--port", type=int, default=8000, help="The port to use if streamable-http transport is enabled (Default: 8000)"
 )
-def mcp(http, host, port):
+@option(
+    "--executable-path",
+    type=str,
+    default=None,
+    help="Path to a custom Chromium-compatible browser executable for browser-based MCP tools",
+)
+@option(
+    "--auth-token",
+    type=str,
+    default=None,
+    help="Require clients to send this token as `Authorization: Bearer <token>` (streamable-http only). "
+    "Setting the SCRAPLING_MCP_AUTH_TOKEN environment variable instead keeps it out of the process list",
+)
+@option(
+    "--allowed-host",
+    type=str,
+    multiple=True,
+    help="Enable DNS-rebinding protection and accept requests for this host only, like 'mcp.example.com:8000' "
+    "(repeatable). Recommended whenever the server listens on a public address",
+)
+@option(
+    "--no-auth",
+    is_flag=True,
+    default=False,
+    help="Serve the streamable-http transport without authentication (not recommended). Without it, `--http` "
+    "refuses to start unless a token is given",
+)
+def mcp(http, host, port, executable_path, auth_token, allowed_host, no_auth):
     from scrapling.core.ai import ScraplingMCPServer
 
-    server = ScraplingMCPServer()
-    server.serve(http, host, port)
+    server = ScraplingMCPServer(executable_path=executable_path, auth_token=auth_token)
+    try:
+        server.serve(http, host, port, allowed_hosts=allowed_host, allow_unauthenticated=no_auth)
+    except ValueError as e:
+        # Turn the unauthenticated-HTTP refusal into a clean CLI error instead of a traceback
+        raise UsageError(str(e)) from e
 
 
 @command(help="Interactive scraping console")
@@ -257,13 +291,19 @@ def _common_http_options(f):
 
 
 def _common_browser_options(f):
-    """Apply shared Click options for browser-based commands (fetch/stealthy_fetch)."""
+    """Apply Click options for browser fetching."""
     decorators = [
         option(
             "--ai-targeted",
             is_flag=True,
             default=False,
             help="Extract only main content and sanitize hidden elements for AI consumption (default: False)",
+        ),
+        option(
+            "--executable-path",
+            type=str,
+            default=None,
+            help="Path to a custom Chromium-compatible browser executable. Falls back to the SCRAPLING_EXECUTABLE_PATH environment variable when not set.",
         ),
         option(
             "--extra-headers",
@@ -295,6 +335,11 @@ def _common_browser_options(f):
             type=int,
             default=30000,
             help="Timeout in milliseconds (default: 30000)",
+        ),
+        option(
+            "--pierce-shadow/--no-pierce-shadow",
+            default=False,
+            help="Include open Shadow DOM content (default: False)",
         ),
         option(
             "--network-idle/--no-network-idle",
@@ -503,6 +548,7 @@ def __build_browser_kwargs(
     headless,
     disable_resources,
     network_idle,
+    pierce_shadow,
     timeout,
     wait,
     wait_selector,
@@ -512,12 +558,14 @@ def __build_browser_kwargs(
     parsed_headers,
     dns_over_https,
     block_ads,
+    executable_path,
 ) -> Dict[str, Any]:
     """Build shared kwargs dict for browser-based commands."""
     kwargs: Dict[str, Any] = {
         "headless": headless,
         "disable_resources": disable_resources,
         "network_idle": network_idle,
+        "pierce_shadow": pierce_shadow,
         "timeout": timeout,
         "locale": locale,
         "real_chrome": real_chrome,
@@ -532,50 +580,10 @@ def __build_browser_kwargs(
         kwargs["proxy"] = proxy
     if parsed_headers:
         kwargs["extra_headers"] = parsed_headers
+    executable_path = executable_path or environ.get("SCRAPLING_EXECUTABLE_PATH") or None
+    if executable_path:
+        kwargs["executable_path"] = executable_path
     return kwargs
-
-
-@extract.command(help=f"Use DynamicFetcher to fetch content with browser automation.\n\n{__OUTPUT_FILE_HELP__}")
-@argument("url", required=True)
-@argument("output_file", required=True)
-@_common_browser_options
-def fetch(
-    url,
-    output_file,
-    headless,
-    disable_resources,
-    network_idle,
-    timeout,
-    wait,
-    css_selector,
-    wait_selector,
-    locale,
-    real_chrome,
-    proxy,
-    extra_headers,
-    ai_targeted,
-    dns_over_https,
-    block_ads,
-):
-    """Opens up a browser and fetch content using DynamicFetcher."""
-    parsed_headers, _ = _ParseHeaders(extra_headers, False)
-    kwargs = __build_browser_kwargs(
-        headless,
-        disable_resources,
-        network_idle,
-        timeout,
-        wait,
-        wait_selector,
-        locale,
-        real_chrome,
-        proxy,
-        parsed_headers,
-        dns_over_https,
-        block_ads,
-    )
-    from scrapling.fetchers import DynamicFetcher
-
-    __Request_and_Save(DynamicFetcher.fetch, url, output_file, css_selector, ai_targeted=ai_targeted, **kwargs)
 
 
 @extract.command(help=f"Use StealthyFetcher to fetch content with advanced stealth features.\n\n{__OUTPUT_FILE_HELP__}")
@@ -598,12 +606,13 @@ def fetch(
     help="Add noise to canvas operations (default: False)",
 )
 @_common_browser_options
-def stealthy_fetch(
+def fetch(
     url,
     output_file,
     headless,
     disable_resources,
     network_idle,
+    pierce_shadow,
     timeout,
     wait,
     css_selector,
@@ -617,6 +626,7 @@ def stealthy_fetch(
     allow_webgl,
     hide_canvas,
     ai_targeted,
+    executable_path,
     dns_over_https,
     block_ads,
 ):
@@ -626,6 +636,7 @@ def stealthy_fetch(
         headless,
         disable_resources,
         network_idle,
+        pierce_shadow,
         timeout,
         wait,
         wait_selector,
@@ -635,6 +646,7 @@ def stealthy_fetch(
         parsed_headers,
         dns_over_https,
         block_ads,
+        executable_path,
     )
     kwargs.update(
         {
@@ -650,6 +662,7 @@ def stealthy_fetch(
 
 
 @group()
+@version_option(version=__version__, prog_name="Scrapling")
 def main():
     pass
 

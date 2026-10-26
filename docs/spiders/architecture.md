@@ -1,3 +1,8 @@
+---
+title: "How Scrapling Web Crawlers Work"
+description: "See how spiders, requests, sessions, scheduling and the crawl engine fit together. Compare the workflow with Scrapy and choose a starting point."
+---
+
 # Spiders architecture
 
 !!! success "Prerequisites"
@@ -60,7 +65,6 @@ A priority queue with built-in URL deduplication. Requests are fingerprinted bas
 Manages one or more named session instances. Each session is one of:
 
 - [FetcherSession](../fetching/static.md)
-- [AsyncDynamicSession](../fetching/dynamic.md)
 - [AsyncStealthySession](../fetching/stealthy.md)
 
 When a request comes in, the Session Manager routes it to the correct session based on the request's `sid` field. Sessions can be started with the spider start (default) or lazily (started on the first use).
@@ -75,7 +79,7 @@ An optional cache that, when development mode is enabled, stores every fetched r
 
 ### Output
 
-Scraped items are collected in an `ItemList` (a list subclass with `to_json()` and `to_jsonl()` export methods). Crawl statistics are tracked in a `CrawlStats` dataclass which contains a lot of useful info.
+Scraped items are collected in an `ItemList` (a list subclass with `to_json()`, `to_jsonl()`, `to_csv()`, and `to_xml()` export methods). Crawl statistics are tracked in a `CrawlStats` dataclass which contains a lot of useful info.
 
 
 ## Comparison with Scrapy
@@ -97,7 +101,7 @@ If you're coming from Scrapy, here's how Scrapling's spider system maps:
 | Domain filtering   | `allowed_domains`             | `allowed_domains`                                               |
 | Robots.txt         | `ROBOTSTXT_OBEY` setting      | `robots_txt_obey` class attribute                               |
 | Pause/Resume       | `JOBDIR` setting              | `crawldir` constructor argument                                 |
-| Export             | Feed exports                  | `result.items.to_json()` / `to_jsonl()` or custom through hooks |
+| Export             | Feed exports                  | `result.items.to_json()` / `to_jsonl()` / `to_csv()` / `to_xml()` or custom through hooks |
 | Running            | `scrapy crawl spider_name`    | `MySpider().start()`                                            |
 | Streaming          | N/A                           | `async for item in spider.stream()`                             |
 | Multi-session      | N/A                           | Multiple sessions with different types per spider               |

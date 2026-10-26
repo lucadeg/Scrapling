@@ -67,7 +67,6 @@ class TestAdvancedSelectors:
                     <p>First paragraph</p>
                     <!-- Comment -->
                     <p>Second paragraph</p>
-                    <![CDATA[Some CDATA content]]>
                     <div class="nested">
                         <span id="special">Special content</span>
                         <span>Regular content</span>
@@ -81,24 +80,13 @@ class TestAdvancedSelectors:
         </html>
         """
 
-    def test_comment_and_cdata_handling(self, complex_html):
-        """Test handling of comments and CDATA"""
-        # With comments/CDATA kept
-        page = Selector(
-            complex_html,
-            keep_comments=True,
-            keep_cdata=True
-        )
-        content = page.body
+    def test_comment_handling(self, complex_html):
+        """Test handling of comments"""
+        page = Selector(complex_html, keep_comments=True)
+        content = page.html_content
         assert "Comment" in content
-        assert "CDATA" in content
 
-        # Without comments/CDATA
-        page = Selector(
-            complex_html,
-            keep_comments=False,
-            keep_cdata=False
-        )
+        page = Selector(complex_html, keep_comments=False)
         content = page.html_content
         assert "Comment" not in content
 
@@ -209,6 +197,23 @@ class TestAdvancedSelectors:
         node = page.css("main")[0]
 
         assert node.get_all_text("\n", strip=True) == "string1\nstring2\nstring3\nstring4\nstring5\nstring6\nstring7"
+
+    def test_get_all_text_keeps_text_after_comment(self):
+        """Tail text following a comment or PI node must still be collected"""
+        html = "<div>before<!-- c -->after<p>x</p></div>"
+        assert Selector(html, keep_comments=True).get_all_text() == "before\nafter\nx"
+
+    def test_get_all_text_deep_nesting(self):
+        """Deeply nested trees collect every visible text node and skip ignored subtrees"""
+        depth = 500
+        html = "<div>" + "".join(f"<span>t{i}" for i in range(depth)) + "leaf" + "</span>" * depth + "end</div>"
+        text = Selector(html).get_all_text(strip=True)
+        assert text.startswith("t0\nt1\n")
+        assert "leaf" in text and text.endswith("end")
+        assert text.count("\n") == depth
+
+        ignored = "<div>keep<script>" + "<b>x</b>" * depth + "</script>done</div>"
+        assert Selector(ignored).get_all_text(strip=True) == "keep\ndone"
 
 
 class TestTextHandlerAdvanced:

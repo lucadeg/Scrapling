@@ -1,6 +1,7 @@
 from abc import ABC
 from random import choice
 from time import sleep as time_sleep
+from urllib.parse import urlencode
 from asyncio import sleep as asyncio_sleep
 
 from curl_cffi.curl import CurlError
@@ -19,6 +20,7 @@ from scrapling.core._types import (
     Unpack,
     Optional,
     Awaitable,
+    ProxyType,
     SUPPORTED_HTTP_METHODS,
     FollowRedirects,
 )
@@ -155,6 +157,16 @@ class _ConfigurationLogic(ABC):
             if k not in skip_keys and v is not None:
                 final_args[k] = v
 
+        if (
+            isinstance(final_args.get("data"), dict)
+            and final_args.get("json") is None
+            and final_args.get("content") is None
+            and not final_args.get("multipart")
+        ):
+            final_args["data"] = urlencode(final_args["data"], doseq=True)
+            if not any(k.lower() == "content-type" for k in final_args["headers"]):
+                final_args["headers"]["Content-Type"] = "application/x-www-form-urlencoded"
+
         if http3_enabled:  # pragma: no cover
             final_args["http_version"] = CurlHttpVersion.V3ONLY
             if impersonate:
@@ -171,7 +183,13 @@ class _ConfigurationLogic(ABC):
         3. Sets a Google referer header.
         """
         # Merge session headers with request headers, request takes precedence (if it was set)
-        final_headers = {**self._default_headers, **(headers if headers else {})}
+        # Header names are case-insensitive, so a session header spelled differently must not be sent next to it
+        headers = headers if headers else {}
+        request_keys = {k.lower() for k in headers}
+        session_headers = {
+            k: v for k, v in self._default_headers.items() if k in headers or k.lower() not in request_keys
+        }
+        final_headers = {**session_headers, **headers}
         headers_keys = {k.lower() for k in final_headers}
         if stealth:
             if "referer" not in headers_keys:
@@ -227,7 +245,8 @@ class _SyncSessionLogic(_ConfigurationLogic):
         stealth = self._stealth if stealth is None else stealth
 
         selector_config = self._get_param(kwargs, "selector_config", self.selector_config) or self.selector_config
-        max_retries = self._get_param(kwargs, "retries", self._default_retries)
+        # Always attempt the request once; `retries` below 1 (or `None`) means "send it, but don't retry"
+        max_retries = max(1, self._get_param(kwargs, "retries", self._default_retries) or 1)
         retry_delay = self._get_param(kwargs, "retry_delay", self._default_retry_delay)
         static_proxy = kwargs.pop("proxy", None)
 
@@ -244,10 +263,11 @@ class _SyncSessionLogic(_ConfigurationLogic):
 
         try:
             for attempt in range(max_retries):
+                proxy: Optional[ProxyType]
                 if self._proxy_rotator and static_proxy is None:
                     proxy = self._proxy_rotator.get_proxy()
                 else:
-                    proxy = static_proxy
+                    proxy = static_proxy or self._default_proxy
 
                 request_args = self._merge_request_args(stealth=stealth, proxy=proxy, **kwargs)
                 try:
@@ -441,7 +461,8 @@ class _ASyncSessionLogic(_ConfigurationLogic):
         stealth = self._stealth if stealth is None else stealth
 
         selector_config = self._get_param(kwargs, "selector_config", self.selector_config) or self.selector_config
-        max_retries = self._get_param(kwargs, "retries", self._default_retries)
+        # Always attempt the request once; `retries` below 1 (or `None`) means "send it, but don't retry"
+        max_retries = max(1, self._get_param(kwargs, "retries", self._default_retries) or 1)
         retry_delay = self._get_param(kwargs, "retry_delay", self._default_retry_delay)
         static_proxy = kwargs.pop("proxy", None)
 
@@ -461,10 +482,11 @@ class _ASyncSessionLogic(_ConfigurationLogic):
         try:
             # Determine if we should use proxy rotation
             for attempt in range(max_retries):
+                proxy: Optional[ProxyType]
                 if self._proxy_rotator and static_proxy is None:
                     proxy = self._proxy_rotator.get_proxy()
                 else:
-                    proxy = static_proxy
+                    proxy = static_proxy or self._default_proxy
 
                 request_args = self._merge_request_args(stealth=stealth, proxy=proxy, **kwargs)
                 try:

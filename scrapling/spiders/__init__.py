@@ -5,7 +5,16 @@ from .engine import CrawlerEngine
 from .session import SessionManager
 from .spider import Spider, SessionConfigurationError
 from .links import LinkExtractor
-from .templates import CrawlSpider, SitemapSpider, CrawlRule
+from .templates import (
+    CrawlSpider,
+    SitemapSpider,
+    CrawlRule,
+    ShopifySpider,
+    XMLFeedSpider,
+    CSVFeedSpider,
+    ContentSpider,
+    SiteToMarkdownSpider,
+)
 from scrapling.engines.toolbelt.custom import Response
 
 __all__ = [
@@ -21,4 +30,9 @@ __all__ = [
     "CrawlSpider",
     "CrawlRule",
     "SitemapSpider",
+    "ShopifySpider",
+    "XMLFeedSpider",
+    "CSVFeedSpider",
+    "ContentSpider",
+    "SiteToMarkdownSpider",
 ]

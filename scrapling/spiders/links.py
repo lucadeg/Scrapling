@@ -150,11 +150,17 @@ def _compile_patterns(patterns: Union[str, Pattern[str], PatternInput, None]) ->
 
 
 def _url_extension(url: str) -> str:
+    extensions = _url_extensions(url)
+    return extensions[0] if extensions else ""
+
+
+def _url_extensions(url: str) -> Tuple[str, ...]:
     path = urlsplit(url).path
     _, _, last = path.rpartition("/")
     if "." not in last:
-        return ""
-    return last.rsplit(".", 1)[1].lower()
+        return ()
+    parts = last.lower().split(".")
+    return tuple(".".join(parts[i:]) for i in range(1, len(parts)) if parts[i])
 
 
 def _filler(x):
@@ -226,11 +232,12 @@ class LinkExtractor:
         if self.restrict_css:
             for cs in self.restrict_css:
                 scopes.extend(response.css(cs))
-        if not scopes:
+        # Only an unrestricted extractor reads the whole page; a restriction that matches nothing yields no links
+        if not self.restrict_xpath and not self.restrict_css:
             scopes = [response]
 
         out: List[str] = []
-        search_selector = "| ".join([f".//{tag}/@{attr}" for tag in self.tags for attr in self.attrs])
+        search_selector = "| ".join([f"descendant-or-self::{tag}/@{attr}" for tag in self.tags for attr in self.attrs])
         for scope in scopes:
             for url in scope._root.xpath(search_selector):
                 if not url:
@@ -277,8 +284,7 @@ class LinkExtractor:
         if url.split("://", 1)[0] not in valid_schemas:
             return False
 
-        ext = _url_extension(url)
-        if ext and ext in self.deny_extensions:
+        if self.deny_extensions and any(ext in self.deny_extensions for ext in _url_extensions(url)):
             return False
 
         if self.allow and not any(p.search(url) for p in self.allow):
